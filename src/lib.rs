@@ -1,5 +1,6 @@
 //! Clean Vocal: AI vocal cleaner plugin (VST3 / CLAP), powered by DeepFilterNet3.
 
+pub mod editor;
 pub mod engine;
 
 use engine::{Engine, Settings};
@@ -15,6 +16,10 @@ pub struct CleanVocal {
 
 #[derive(Params)]
 pub struct CleanVocalParams {
+    /// Remembers the panel size/state with the project.
+    #[persist = "editor-state"]
+    pub editor_state: Arc<nih_plug_egui::EguiState>,
+
     /// How much noise to remove. 100% = everything that isn't voice.
     #[id = "strength"]
     pub strength: FloatParam,
@@ -34,6 +39,7 @@ pub struct CleanVocalParams {
 impl Default for CleanVocalParams {
     fn default() -> Self {
         Self {
+            editor_state: editor::default_state(),
             strength: FloatParam::new("Strength", 100.0, FloatRange::Linear { min: 0.0, max: 100.0 })
                 .with_unit(" %")
                 .with_step_size(1.0),
@@ -94,6 +100,10 @@ impl Plugin for CleanVocal {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(self.params.clone())
     }
 
     fn initialize(

@@ -16,6 +16,9 @@ Powered by the DeepFilterNet3 speech-enhancement model.
 
 ## Controls
 
+The plugin opens with its own panel: drag a knob up/down to turn it (hold Shift for fine control),
+double-click a knob to reset it, click a switch to flip it.
+
 | Control | What it does | Default |
 |---|---|---|
 | Strength | How much noise to remove. 100% removes everything that isn't voice; lower keeps some room/air. | 100% |
