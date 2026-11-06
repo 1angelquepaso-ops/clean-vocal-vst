@@ -1,0 +1,35 @@
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
+[package]
+name = "clean_vocal"
+version = "1.0.0"
+edition = "2021"
+description = "AI vocal cleaner (DeepFilterNet3) as a VST3/CLAP plugin"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "cv_offline"
+path = "src/bin/cv_offline.rs"
+required-features = ["offline"]
+
+[features]
+offline = ["dep:hound"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+rubato = "0.14"
+hound = { version = "3.5", optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
