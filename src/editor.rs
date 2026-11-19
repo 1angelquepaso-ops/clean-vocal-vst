@@ -1,9 +1,11 @@
-//! Clean Vocal panel: three rotary knobs (Strength, Hum Cut Freq) plus two switches
-//! (Extra Clean, Hum Cut), laid out as four controls in a row.
+//! Clean Vocal panel: mode selector + status line, a row of knobs (Max Cut, Release, Mix,
+//! Hum Freq) and a row of switches (Extra Clean, Hum Cut, Mono).
 //!
 //! Knobs: drag up/down to turn (hold Shift for fine control), double-click to reset.
 
-use crate::CleanVocalParams;
+use crate::engine::Status;
+use crate::{CleanVocalParams, ModeParam};
+use std::sync::atomic::Ordering;
 use nih_plug::prelude::*;
 use nih_plug_egui::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2,
@@ -12,8 +14,8 @@ use nih_plug_egui::{create_egui_editor, EguiState};
 use std::f32::consts::PI;
 use std::sync::Arc;
 
-pub const WIDTH: u32 = 520;
-pub const HEIGHT: u32 = 230;
+pub const WIDTH: u32 = 640;
+pub const HEIGHT: u32 = 420;
 
 pub fn default_state() -> Arc<EguiState> {
     EguiState::from_size(WIDTH, HEIGHT)
@@ -31,7 +33,7 @@ const TEXT_DIM: Color32 = Color32::from_rgb(0x8A, 0x94, 0xA0);
 const KNOB_START: f32 = 0.75 * PI; // 7:30 o'clock
 const KNOB_SWEEP: f32 = 1.5 * PI; // 270 degrees
 
-pub fn create(params: Arc<CleanVocalParams>) -> Option<Box<dyn Editor>> {
+pub fn create(params: Arc<CleanVocalParams>, status: Arc<Status>) -> Option<Box<dyn Editor>> {
     let state = params.editor_state.clone();
     create_egui_editor(
         state,
@@ -43,27 +45,56 @@ pub fn create(params: Arc<CleanVocalParams>) -> Option<Box<dyn Editor>> {
             ctx.set_style(style);
         },
         move |ctx, setter, _| {
+            // Keep the status line live.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(16)))
                 .show(ctx, |ui| {
-                    header(ui);
+                    header(ui, &status);
                     ui.add_space(10.0);
-                    let row_h = ui.available_height();
-                    let cell_w = (ui.available_width() - 3.0 * 10.0) / 4.0;
+                    mode_bar(ui, &params, setter);
+                    ui.add_space(10.0);
+                    let mode = params.mode.value();
+                    let gap = 10.0;
+                    let total_h = ui.available_height();
+                    let knob_h = (total_h - gap) * 0.62;
+                    let sw_h = total_h - gap - knob_h;
+                    let cell_w = (ui.available_width() - 3.0 * gap) / 4.0;
+                    let hum_on = params.hum_cut.value();
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
-                        let hum_on = params.hum_cut.value();
-                        cell(ui, cell_w, row_h, "STRENGTH", true, |ui| {
-                            knob(ui, &params.strength, setter, true)
+                        ui.spacing_mut().item_spacing.x = gap;
+                        let cut_cap = match mode {
+                            ModeParam::Gentle => "MAX CUT (8 dB cap)",
+                            ModeParam::Hq => "MAX CUT (30 dB min)",
+                            _ => "MAX CUT",
+                        };
+                        cell(ui, cell_w, knob_h, cut_cap, true, |ui| {
+                            knob(ui, &params.cut, setter, true)
                         });
-                        cell(ui, cell_w, row_h, "EXTRA CLEAN", true, |ui| {
+                        cell(ui, cell_w, knob_h, "RELEASE", true, |ui| {
+                            knob(ui, &params.release, setter, true)
+                        });
+                        cell(ui, cell_w, knob_h, "MIX", true, |ui| knob(ui, &params.mix, setter, true));
+                        cell(ui, cell_w, knob_h, "HUM FREQ", hum_on, |ui| {
+                            knob(ui, &params.hum_cut_hz, setter, hum_on)
+                        });
+                    });
+                    ui.add_space(gap);
+                    let sw_w = (ui.available_width() - 2.0 * gap) / 3.0;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        let extra_active = mode == ModeParam::Standard;
+                        let extra_cap = match mode {
+                            ModeParam::Hq => "EXTRA CLEAN (always on in HQ)",
+                            ModeParam::Standard => "EXTRA CLEAN",
+                            _ => "EXTRA CLEAN (STANDARD only)",
+                        };
+                        cell(ui, sw_w, sw_h, extra_cap, extra_active, |ui| {
                             switch(ui, &params.extra_clean, setter)
                         });
-                        cell(ui, cell_w, row_h, "HUM CUT", true, |ui| {
-                            switch(ui, &params.hum_cut, setter)
-                        });
-                        cell(ui, cell_w, row_h, "HUM FREQ", hum_on, |ui| {
-                            knob(ui, &params.hum_cut_hz, setter, hum_on)
+                        cell(ui, sw_w, sw_h, "HUM CUT", true, |ui| switch(ui, &params.hum_cut, setter));
+                        cell(ui, sw_w, sw_h, "MONO (half the CPU)", true, |ui| {
+                            switch(ui, &params.mono, setter)
                         });
                     });
                 });
@@ -71,10 +102,69 @@ pub fn create(params: Arc<CleanVocalParams>) -> Option<Box<dyn Editor>> {
     )
 }
 
-fn header(ui: &mut Ui) {
+const MODES: [(ModeParam, &str, &str); 4] = [
+    (ModeParam::Live, "LIVE", "for tracking"),
+    (ModeParam::Standard, "STANDARD", "everyday"),
+    (ModeParam::Hq, "HQ", "strongest"),
+    (ModeParam::Gentle, "GENTLE", "natural"),
+];
+
+fn mode_bar(ui: &mut Ui, params: &CleanVocalParams, setter: &ParamSetter) {
+    let gap = 8.0;
+    let w = (ui.available_width() - 3.0 * gap) / 4.0;
+    let cur = params.mode.value();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (m, name, sub) in MODES {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::click());
+            let on = cur == m;
+            let p = ui.painter();
+            p.rect_filled(rect, 8.0, if on { ACCENT } else { PANEL });
+            let fg = if on { BG } else { TEXT };
+            p.text(
+                Pos2::new(rect.center().x, rect.min.y + 17.0),
+                Align2::CENTER_CENTER,
+                name,
+                FontId::proportional(14.0),
+                fg,
+            );
+            p.text(
+                Pos2::new(rect.center().x, rect.min.y + 34.0),
+                Align2::CENTER_CENTER,
+                sub,
+                FontId::proportional(10.0),
+                if on { BG } else { TEXT_DIM },
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() && !on {
+                setter.begin_set_parameter(&params.mode);
+                setter.set_parameter(&params.mode, m);
+                setter.end_set_parameter(&params.mode);
+            }
+        }
+    });
+}
+
+fn header(ui: &mut Ui, status: &Status) {
+    let sr = status.sample_rate.load(Ordering::Relaxed).max(1) as f32;
+    let lat_ms = status.latency_samples.load(Ordering::Relaxed) as f32 * 1000.0 / sr;
+    let drops = status.dropouts.load(Ordering::Relaxed);
+    let loading = status.loading.load(Ordering::Relaxed);
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("CLEAN VOCAL").color(TEXT).size(18.0).strong());
-        ui.label(egui::RichText::new("AI noise removal").color(TEXT_DIM).size(12.0));
+        ui.label(egui::RichText::new("AI noise removal  v3").color(TEXT_DIM).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (txt, col) = if loading {
+                ("loading AI...".to_string(), TEXT_DIM)
+            } else if drops > 0 {
+                (format!("{lat_ms:.0} ms  |  {drops} catch-ups"), Color32::from_rgb(0xE8, 0xB0, 0x4A))
+            } else {
+                (format!("{lat_ms:.0} ms  |  no dropouts"), TEXT_DIM)
+            };
+            ui.label(egui::RichText::new(txt).color(col).size(12.0));
+        });
     });
 }
 
